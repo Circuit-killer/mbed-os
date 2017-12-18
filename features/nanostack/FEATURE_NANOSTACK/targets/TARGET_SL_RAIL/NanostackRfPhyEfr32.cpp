@@ -118,7 +118,7 @@ static const RAIL_CsmaConfig_t csma_config = RAIL_CSMA_CONFIG_802_15_4_2003_2p4_
 #if defined(TARGET_EFR32_1)
 #include "ieee802154_subg_efr32xg1_configurator_out.h"
 #elif defined(TARGET_EFR32_12)
-#include "ieee802154_subg_efr32xg12_configurator_out.h"
+#include "ieee802154_subg_efr32xg1_configurator_out.h"
 /* TODO: Add SubG support for EFR32_12 */
 #else
 #error "Not a valid target."
