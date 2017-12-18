@@ -3054,7 +3054,7 @@
         "inherits": ["EFM32"],
         "extra_labels_add": ["EFR32FG12", "256K", "SL_RAIL", "SL_CRYPTO"],
         "core": "Cortex-M4F",
-        "macros": ["EFR32FG12", "EFR32FG12P433F1024GL125", "TRANSACTION_QUEUE_SIZE_SPI=4"],
+        "macros": ["EFR32FG12", "TARGET_EFR32_12", "EFR32FG12P433F1024GL125", "TRANSACTION_QUEUE_SIZE_SPI=4"],
         "supported_toolchains": ["GCC_ARM", "ARM", "uARM", "IAR"],
         "release_versions": ["2", "5"],
         "public": false,
