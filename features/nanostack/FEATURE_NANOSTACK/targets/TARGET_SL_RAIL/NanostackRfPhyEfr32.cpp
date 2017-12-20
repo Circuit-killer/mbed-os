@@ -370,6 +370,17 @@ static int8_t rf_device_register(void)
     // Enable 802.15.4 acceleration features
     RAIL_IEEE802154_Init(gRailHandle, &config);
 
+    // Start radio thread if RTOS is present
+    // This is required as nanostack cannot be accessed from an interrupt context
+    // https://github.com/ARMmbed/mbed-os/issues/5155
+    // and must be created prior to interrupts occuring to avoid an os parameter error
+    // https://github.com/ARMmbed/mbed-os/issues/5680
+#ifdef MBED_CONF_RTOS_PRESENT
+    rx_queue_head = 0;
+    rx_queue_tail = 0;
+    rf_thread_id = osThreadCreate(osThread(rf_thread_loop), NULL);
+#endif
+
     // Fire all events by default
     RAIL_ConfigEvents(gRailHandle,
                       RAIL_EVENTS_ALL,
@@ -461,12 +472,6 @@ static int8_t rf_device_register(void)
     if(radio_state == RADIO_UNINIT) {
         radio_state = RADIO_INITING;
     }
-
-#ifdef MBED_CONF_RTOS_PRESENT
-    rx_queue_head = 0;
-    rx_queue_tail = 0;
-    rf_thread_id = osThreadCreate(osThread(rf_thread_loop), NULL);
-#endif
 
     return rf_radio_driver_id;
 }
