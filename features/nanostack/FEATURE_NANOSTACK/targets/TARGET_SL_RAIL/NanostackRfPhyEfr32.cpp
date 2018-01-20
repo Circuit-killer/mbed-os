@@ -45,7 +45,7 @@
 
 /* RF_QUEUE_SIZE defines queue size for incoming messages */
 #ifndef RF_QUEUE_SIZE
-#define RF_QUEUE_SIZE  8
+#define RF_QUEUE_SIZE  1
 #endif
 
 #ifndef RF_MAX_PACKET_SIZE
@@ -69,7 +69,7 @@ enum RFThreadSignal {
     SL_PACKET_OVERSIZE  = (1 << 13),
 
     // ACK pend flag can be signalled in addition to RX_DONE
-    SL_ACK_PEND         = (1 << 30),
+    SL_ACK_PEND         = (1 << 14),
 };
 
 /*  Adaptor thread definitions */
@@ -78,9 +78,6 @@ static osThreadDef(rf_thread_loop, osPriorityRealtime, RF_THREAD_STACK_SIZE);
 static osThreadId rf_thread_id;
 
 /* Queue for passing messages from interrupt to adaptor thread */
-static volatile void* rx_queue[RF_QUEUE_SIZE];
-static volatile size_t rx_queue_head;
-static volatile size_t rx_queue_tail;
 
 typedef struct {
     int16_t rssi;
@@ -88,7 +85,11 @@ typedef struct {
     uint16_t length;
     uint8_t data[RF_MAX_PACKET_SIZE];
 } sl_message_t;
-static MemoryPool<sl_message_t, RF_QUEUE_SIZE> rx_pool;
+
+static volatile sl_message_t rx_queue[RF_QUEUE_SIZE];
+static volatile size_t rx_queue_head;
+static volatile size_t rx_queue_tail;
+
 
 /* Silicon Labs headers */
 extern "C" {
@@ -286,7 +287,7 @@ static void rf_thread_loop(const void *arg)
         if (event.value.signals & SL_RX_DONE) {
             SL_DEBUG_PRINT("rf_thread_loop: SL_RX_DONE signal received");
             while(rx_queue_tail != rx_queue_head) {
-                sl_message_t* packet = (sl_message_t*) rx_queue[rx_queue_tail];
+                sl_message_t* packet = (sl_message_t*) &rx_queue[rx_queue_tail];
                 SL_DEBUG_PRINT("rPKT %d\n", packet->length);
                 device_driver.phy_rx_cb(
                         packet->data, /* Data payload for Nanostack starts at FCS */
@@ -295,8 +296,6 @@ static void rf_thread_loop(const void *arg)
                         packet->rssi, /* RSSI in first byte */
                         rf_radio_driver_id);
 
-                rx_pool.free(packet);
-                rx_queue[rx_queue_tail] = NULL;
                 rx_queue_tail = (rx_queue_tail + 1) % RF_QUEUE_SIZE;
             }
 
@@ -769,6 +768,7 @@ static int8_t rf_address_write(phy_address_type_e address_type, uint8_t *address
             PAN_address = address_ptr[0] << 8 | address_ptr[1];
             RAIL_IEEE802154_SetPanId(gRailHandle, PAN_address, 0);
             break;
+
     }
     return ret_val;
 }
@@ -984,6 +984,7 @@ static void radioEventHandler(RAIL_Handle_t railHandle,
             */
             case RAIL_EVENT_RX_PACKET_RECEIVED_SHIFT:
                 {
+                    sl_message_t packetBuffer;
 
                     /* Get RX packet that got signaled */
                     RAIL_RxPacketInfo_t rxPacketInfo;
@@ -1006,21 +1007,15 @@ static void radioEventHandler(RAIL_Handle_t railHandle,
                             rf_thread_signal(rf_thread_id, SL_PACKET_OVERSIZE);
                             break;
                         }
-                        sl_message_t* packetBuffer = (sl_message_t*) rx_pool.alloc();
-                        if(packetBuffer == NULL) {
-                            //SL_DEBUG_PRINT("Out of memory\n");
-                            rf_thread_signal(rf_thread_id, SL_NO_MEM);
-                            break;
-                        }
 
-                        packetBuffer->rssi = rxPacketDetails.rssi;
-                        packetBuffer->lqi = rxPacketDetails.lqi;
-                        packetBuffer->length = rxPacketInfo.packetBytes;
+                        packetBuffer.rssi = rxPacketDetails.rssi;
+                        packetBuffer.lqi = rxPacketDetails.lqi;
+                        packetBuffer.length = rxPacketInfo.packetBytes;
 
                         /* Copy packet payload from circular FIFO into contiguous memory */
-                        memcpy(&packetBuffer->data, rxPacketInfo.firstPortionData, rxPacketInfo.firstPortionBytes);
+                        memcpy(&packetBuffer.data, rxPacketInfo.firstPortionData, rxPacketInfo.firstPortionBytes);
                         if (rxPacketInfo.firstPortionBytes < rxPacketInfo.packetBytes) {
-                            memcpy(&packetBuffer->data[rxPacketInfo.firstPortionBytes],
+                            memcpy(&packetBuffer.data[rxPacketInfo.firstPortionBytes],
                                    rxPacketInfo.lastPortionData,
                                    rxPacketInfo.packetBytes - rxPacketInfo.firstPortionBytes);
                         }
@@ -1029,14 +1024,14 @@ static void radioEventHandler(RAIL_Handle_t railHandle,
                         RAIL_ReleaseRxPacket(gRailHandle, rxHandle);
 
                         /* If this is an ACK, deal with it */
-                        if( packetBuffer->data[0] == 5                         &&
-                            packetBuffer->data[3] == (current_tx_sequence)     &&
+                        if( packetBuffer.data[0] == 5                         &&
+                            packetBuffer.data[3] == (current_tx_sequence)     &&
                             waiting_for_ack) {
                             /* Tell the radio to not ACK an ACK */
                             RAIL_CancelAutoAck(gRailHandle);
                             waiting_for_ack = false;
                             /* Save the pending bit */
-                            last_ack_pending_bit = (packetBuffer->data[1] & (1 << 4)) != 0;
+                            last_ack_pending_bit = (packetBuffer.data[1] & (1 << 4)) != 0;
                             /* Tell the stack we got an ACK */
 #ifdef MBED_CONF_RTOS_PRESENT
                             rf_thread_signal(rf_thread_id, SL_ACK_RECV | (last_ack_pending_bit ? SL_ACK_PEND : 0));
@@ -1048,7 +1043,6 @@ static void radioEventHandler(RAIL_Handle_t railHandle,
                                                           1,
                                                           1);
 #endif
-                            rx_pool.free(packetBuffer);
                         } else {
                             /* Figure out whether we want to not ACK this packet */
 
@@ -1059,17 +1053,16 @@ static void radioEventHandler(RAIL_Handle_t railHandle,
                             *   [1] => b[0:2] frame type, b[3] = security enabled, b[4] = frame pending, b[5] = ACKreq, b[6] = intrapan
                             *   [2] => b[2:3] destmode, b[4:5] version, b[6:7] srcmode
                             */
-                            if( (packetBuffer->data[1] & (1 << 5)) == 0 ) {
+                            if( (packetBuffer.data[1] & (1 << 5)) == 0 ) {
                                 /* Cancel the ACK if the sender did not request one */
                                 RAIL_CancelAutoAck(gRailHandle);
                             }
 #ifdef MBED_CONF_RTOS_PRESENT
                             if (((rx_queue_head + 1) % RF_QUEUE_SIZE) != rx_queue_tail) {
-                                rx_queue[rx_queue_head] = (void*)packetBuffer;
+                                memcpy((void*) &rx_queue[rx_queue_head], &packetBuffer, sizeof(sl_message_t));
                                 rx_queue_head = (rx_queue_head + 1) % RF_QUEUE_SIZE;
                                 rf_thread_signal(rf_thread_id, SL_RX_DONE);
                             } else {
-                                rx_pool.free(packetBuffer);
                                 rf_thread_signal(rf_thread_id, SL_QUEUE_FULL);
                             }
 #else
@@ -1079,7 +1072,6 @@ static void radioEventHandler(RAIL_Handle_t railHandle,
                                                     rxPacket[1], /* LQI in second byte */
                                                     rxPacket[0], /* RSSI in first byte */
                                                     rf_radio_driver_id);
-                            rx_pool.free(packetBuffer);
 #endif
                         }
                     }
